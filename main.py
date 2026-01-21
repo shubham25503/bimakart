@@ -55,13 +55,40 @@ def download_product_excel(product_id: str):
     product = next((p for p in products if p["_id"] == product_id), None)
     if not product:
         return JSONResponse({"error": "Product not found"}, status_code=404)
-    # Prepare columns from fields
+    # Prepare columns and validation info
     columns = [f["fieldId"]["fieldName"] for f in product["fields"]]
-    # Create empty DataFrame with columns
-    df = pd.DataFrame(columns=columns)
+    validations = {}
+    for idx, f in enumerate(product["fields"]):
+        field_type = f["fieldId"].get("dataType", "")
+        options = f["fieldId"].get("options", [])
+        if field_type in ["dropdown", "radio", "checkbox"] and options:
+            validations[idx] = options
+
+    # Create sample data row
+    sample_row = []
+    for idx, f in enumerate(product["fields"]):
+        field_type = f["fieldId"].get("dataType", "")
+        options = f["fieldId"].get("options", [])
+        if field_type in ["dropdown", "radio", "checkbox"] and options:
+            sample_row.append(options[0])
+        else:
+            sample_row.append("Sample Value")
+
+    # Create DataFrame with sample row
+    df = pd.DataFrame([sample_row], columns=columns)
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         df.to_excel(writer, index=False)
+        workbook = writer.book
+        worksheet = writer.sheets["Sheet1"]
+        for col_idx, opts in validations.items():
+            col_letter = chr(ord('A') + col_idx)
+            # Apply data validation for first 100 rows (adjust as needed)
+            worksheet.data_validation(f'{col_letter}2:{col_letter}101', {
+                'validate': 'list',
+                'source': opts,
+                'input_message': 'Select from dropdown',
+            })
     output.seek(0)
     return StreamingResponse(
         output,
