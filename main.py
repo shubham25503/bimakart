@@ -68,6 +68,10 @@ def download_product_excel(product_id: str):
             sample_row.append(12345)
         elif field_type == "adharCard":
             sample_row.append("123412341234")
+        elif field_type == "panCard":
+            sample_row.append("ABCDE1234F")
+        elif field_type == "email":
+            sample_row.append("sample@email.com")
         else:
             sample_row.append("Sample Value")
     df = pd.DataFrame([sample_row], columns=columns)
