@@ -1,0 +1,67 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Product Excel Download</title>
+	<style>
+		body { font-family: Arial, sans-serif; margin: 2rem; }
+		label, select, button { font-size: 1rem; margin: 0.5rem 0; }
+	</style>
+</head>
+<body>
+	<h2>Download Product Fields as Excel</h2>
+	<label for="productSelect">Select Product:</label>
+	<select id="productSelect">
+		<option value="">-- Select --</option>
+	</select>
+	<br>
+	<button id="downloadBtn" style="display:none;">Download Excel</button>
+
+	<script>
+		// Set your backend URL here
+		const BACKEND_URL = 'http://localhost:8081'; // Change as needed
+		const select = document.getElementById('productSelect');
+		const btn = document.getElementById('downloadBtn');
+		let products = [];
+
+		// Fetch products from backend
+		fetch(BACKEND_URL + '/api/products/active')
+			.then(res => res.json())
+			.then(data => {
+				products = data.data || [];
+				products.forEach(p => {
+					const opt = document.createElement('option');
+					opt.value = p._id;
+					opt.textContent = p.name;
+					select.appendChild(opt);
+				});
+			});
+
+		select.addEventListener('change', function() {
+			btn.style.display = select.value ? '' : 'none';
+		});
+
+		btn.addEventListener('click', function() {
+			const productId = select.value;
+			if (!productId) return;
+			const url = BACKEND_URL + `/excel/${productId}`;
+			fetch(url)
+				.then(response => {
+					if (!response.ok) throw new Error('Failed to download');
+					return response.blob();
+				})
+				.then(blob => {
+					const a = document.createElement('a');
+					a.href = window.URL.createObjectURL(blob);
+					a.download = select.options[select.selectedIndex].text.replace(/\s+/g, '_') + '.xlsx';
+					document.body.appendChild(a);
+					a.click();
+					a.remove();
+				})
+				.catch(() => alert('Download failed.'));
+		});
+	</script>
+</body>
+</html>

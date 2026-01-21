@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.env
+.env
+.venv/
+venv/
+ENV/
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
+
+# FastAPI
+*.log
+
+# General
+*.sqlite3
+*.db
+
+# Test and coverage
+htmlcov/
+.coverage
+.tox/
+.pytest_cache/
+
+# Jupyter
+.ipynb_checkpoints
+
+# Others
+*.bak
+*.swp
+*.tmp
