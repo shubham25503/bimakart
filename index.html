@@ -6,24 +6,98 @@
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
 	<title>Product Excel Download</title>
 	<style>
-		body { font-family: Arial, sans-serif; margin: 2rem; }
-		label, select, button { font-size: 1rem; margin: 0.5rem 0; }
+		body {
+			font-family: 'Segoe UI', Arial, sans-serif;
+			background: #f6f8fa;
+			margin: 0;
+			min-height: 100vh;
+			display: flex;
+			justify-content: center;
+			align-items: flex-start;
+		}
+		.container {
+			background: #fff;
+			box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+			border-radius: 16px;
+			padding: 2.5rem 2rem 2rem 2rem;
+			margin-top: 3rem;
+			max-width: 400px;
+			width: 100%;
+		}
+		h2 {
+			margin-top: 0;
+			color: #1a202c;
+			font-size: 1.6rem;
+			font-weight: 600;
+			letter-spacing: 0.01em;
+		}
+		label {
+			font-size: 1.05rem;
+			color: #374151;
+			margin-bottom: 0.5rem;
+			display: block;
+		}
+		select {
+			width: 100%;
+			padding: 0.6rem 0.8rem;
+			border: 1px solid #d1d5db;
+			border-radius: 8px;
+			font-size: 1rem;
+			margin-bottom: 1.2rem;
+			background: #f9fafb;
+			transition: border 0.2s;
+		}
+		select:focus {
+			outline: none;
+			border-color: #2563eb;
+		}
+		button {
+			width: 100%;
+			padding: 0.7rem 0;
+			background: linear-gradient(90deg, #2563eb 60%, #1e40af 100%);
+			color: #fff;
+			border: none;
+			border-radius: 8px;
+			font-size: 1.1rem;
+			font-weight: 500;
+			cursor: pointer;
+			box-shadow: 0 2px 8px rgba(37,99,235,0.08);
+			transition: background 0.2s, box-shadow 0.2s;
+		}
+		button:hover {
+			background: linear-gradient(90deg, #1e40af 60%, #2563eb 100%);
+			box-shadow: 0 4px 16px rgba(37,99,235,0.13);
+		}
+		@media (max-width: 500px) {
+			.container {
+				padding: 1.2rem 0.5rem;
+				margin-top: 1.2rem;
+				max-width: 98vw;
+			}
+			h2 { font-size: 1.2rem; }
+		}
 	</style>
 </head>
 <body>
-	<h2>Download Product Fields as Excel</h2>
-	<label for="productSelect">Select Product:</label>
-	<select id="productSelect">
-		<option value="">-- Select --</option>
-	</select>
-	<br>
-	<button id="downloadBtn" style="display:none;">Download Excel</button>
+	<div class="container">
+		<h2>Download Product Fields as Excel</h2>
+		<label for="productSelect">Select Product:</label>
+		<select id="productSelect">
+			<option value="">-- Select --</option>
+		</select>
+		<button id="downloadBtn" style="display:none; margin-bottom: 1.2rem;">Download Excel</button>
+
+		<form id="uploadForm" style="display:none; margin-top:1.2rem;">
+			<label for="excelFile">Upload Filled Excel:</label>
+			<input type="file" id="excelFile" name="excelFile" accept=".xlsx,.xls" required style="margin-bottom:0.7rem;">
+			<button type="submit" style="margin-top:0.5rem;">Validate Excel</button>
+		</form>
+		<div id="validationResult" style="margin-top:1.2rem;"></div>
+	</div>
 
 	<script>
-		// Set your backend URL here
-		// const BACKEND_URL = 'http://localhost:8081'; // Change as needed
-		const BACKEND_URL = 'https://bimakart.onrender.com'; // Change as needed
-        
+		// const BACKEND_URL = 'http://localhost:8081'; 
+		const BACKEND_URL = 'https://bimakartbackend.onrender.com'; 
 		const select = document.getElementById('productSelect');
 		const btn = document.getElementById('downloadBtn');
 		let products = [];
@@ -43,6 +117,38 @@
 
 		select.addEventListener('change', function() {
 			btn.style.display = select.value ? '' : 'none';
+			document.getElementById('uploadForm').style.display = select.value ? '' : 'none';
+			document.getElementById('validationResult').innerHTML = '';
+				// Excel upload and validation
+				const uploadForm = document.getElementById('uploadForm');
+				const excelFile = document.getElementById('excelFile');
+				const validationResult = document.getElementById('validationResult');
+
+				uploadForm.addEventListener('submit', function(e) {
+					e.preventDefault();
+					const productId = select.value;
+					if (!productId || !excelFile.files.length) return;
+					const formData = new FormData();
+					formData.append('file', excelFile.files[0]);
+					validationResult.innerHTML = 'Validating...';
+					fetch(BACKEND_URL + `/validate-excel/${productId}`, {
+						method: 'POST',
+						body: formData
+					})
+					.then(res => res.json())
+					.then(data => {
+						if (data.valid) {
+							validationResult.innerHTML = `<span style="color:green;font-weight:500;">&#10003; ${data.message}</span>`;
+						} else if (data.errors) {
+							validationResult.innerHTML = `<span style="color:#b91c1c;font-weight:500;">&#10007; Excel has errors:</span><ul style='color:#b91c1c;line-height:1.5;margin:0.5em 0 0 1.2em;'>` + data.errors.map(e => `<li>${e}</li>`).join('') + '</ul>';
+						} else {
+							validationResult.innerHTML = `<span style="color:#b91c1c;">&#10007; Validation failed.</span>`;
+						}
+					})
+					.catch(() => {
+						validationResult.innerHTML = `<span style="color:#b91c1c;">&#10007; Validation failed.</span>`;
+					});
+				});
 		});
 
 		btn.addEventListener('click', function() {
