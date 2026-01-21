@@ -64,6 +64,10 @@ def download_product_excel(product_id: str):
         options = f["fieldId"].get("options", [])
         if field_type in ["dropdown", "radio", "checkbox"] and options:
             sample_row.append(options[0])
+        elif field_type == "number":
+            sample_row.append(12345)
+        elif field_type == "adharCard":
+            sample_row.append("123412341234")
         else:
             sample_row.append("Sample Value")
     df = pd.DataFrame([sample_row], columns=columns)
@@ -111,7 +115,7 @@ async def validate_excel(product_id: str, file: UploadFile = File(...)):
             "options": options
         })
     errors = []
-    for idx, row in df.iterrows():
+    for idx, row in df.iloc[1:].iterrows(): 
         for col_idx, value in enumerate(row):
             rule = field_rules[col_idx]
             t = rule["type"]
