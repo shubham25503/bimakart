@@ -126,59 +126,77 @@ def list_policies(q: str = None, page: int = 1, limit: int = 50):
 def agent_stats(agent_id: str, range: str = Query('1M')):
     db = get_mongo_client().get_database('test')
     start, end = _range_to_dates(range)
-    # find applications for agent
-    try:
-        agent_oid = try_objectid(agent_id)
-        apps = list(db['policyapplications'].find({'agentId': agent_id}))
-    except Exception:
-        apps = list(db['policyapplications'].find({'agentId': agent_id}))
+    # Handle agentId as ObjectId or string
+    agent_q = {'$or': [{'agentId': agent_id}]}
+    if ObjectId is not None:
+        try:
+            agent_oid = ObjectId(agent_id)
+            agent_q['$or'].append({'agentId': agent_oid})
+        except Exception:
+            pass
+    apps = list(db['policyapplications'].find({'$or': [{'agentId': agent_id}, {'agentId': try_objectid(agent_id)}]}))
+    print(f"[DEBUG] Found {len(apps)} policyapplications for agentId {agent_id}")
     app_ids = [a.get('_id') for a in apps]
 
-    # issuances
+    # Map applicationId to productId
+    appid_to_product = {str(a.get('_id')): str(a.get('productId')) if a.get('productId') else None for a in apps}
+
+    # Issuances for this agent in range
     iss_q = {'applicationId': {'$in': app_ids}, 'createdAt': {'$gte': start, '$lte': end}} if app_ids else {'createdAt': {'$gte': start, '$lte': end}}
+    print(f"[DEBUG] Issuance query: {iss_q}")
     issuances = list(db['policyissuances'].find(iss_q)) if app_ids else []
+    print(f"[DEBUG] Found {len(issuances)} policyissuances for agentId {agent_id}")
     policies_issued = len(issuances)
 
-    # payments
+    # Payments for this agent in range
     pay_q = {'applicationId': {'$in': app_ids}, 'createdAt': {'$gte': start, '$lte': end}} if app_ids else {'createdAt': {'$gte': start, '$lte': end}}
+    print(f"[DEBUG] Payment query: {pay_q}")
     payments = list(db['paymentorders'].find(pay_q)) if app_ids else []
+    print(f"[DEBUG] Found {len(payments)} paymentorders for agentId {agent_id}")
+    # Only count successful payments for revenue
     ok_status = set(['paid','success','captured','completed','PAID','SUCCESS','CAPTURED','COMPLETED'])
     revenue = 0
     for p in payments:
-        try:
-            amt = int(p.get('amount') or 0)
-        except Exception:
+        if str(p.get('status', '')).lower() in ok_status:
             try:
-                amt = int(float(p.get('amount') or 0))
+                amt = int(p.get('amount') or 0)
+            except Exception:
+                try:
+                    amt = int(float(p.get('amount') or 0))
+                except Exception:
+                    amt = 0
+            revenue += amt
+
+    # Aggregate sales and revenue per product
+    prod_count = {}
+    for ins in issuances:
+        # Try to get productId from issuance, else from application
+        pid = ins.get('productId')
+        if not pid:
+            pid = appid_to_product.get(str(ins.get('applicationId')))
+        pid = str(pid) if pid else 'unknown'
+        entry = prod_count.setdefault(pid, {'sold': 0, 'revenue': 0})
+        entry['sold'] += 1
+    included_paymentorders = []
+    for p in payments:
+        if str(p.get('status', '')).lower() in ok_status:
+            app_id = str(p.get('applicationId'))
+            pid = appid_to_product.get(app_id) or 'unknown'
+            pid = str(pid)
+            try:
+                amt = int(p.get('amount') or 0)
             except Exception:
                 amt = 0
-        revenue += amt
+            print(f"[DEBUG] Summing paymentorder: _id={p.get('_id')} applicationId={app_id} amount={amt} status={p.get('status')} mappedProductId={pid}")
+            included_paymentorders.append({'_id': str(p.get('_id')), 'amount': amt})
+            prod_count.setdefault(pid, {'sold': 0, 'revenue': 0})
+            prod_count[pid]['revenue'] += amt
 
-    # best selling policy & top policies
-    prod_count = {}
-    appid_to_product = {}
-    for a in apps:
-        aid = a.get('_id')
-        prod = a.get('productId')
-        appid_to_product[str(aid)] = str(prod) if prod else None
-    for ins in issuances:
-        pid = ins.get('productId') or appid_to_product.get(str(ins.get('applicationId')))
-        pid = str(pid) if pid else 'unknown'
-        entry = prod_count.setdefault(pid, {'sold':0, 'revenue':0})
-        entry['sold'] += 1
-    for p in payments:
-        pid = appid_to_product.get(str(p.get('applicationId'))) or 'unknown'
-        pid = str(pid)
-        try:
-            amt = int(p.get('amount') or 0)
-        except Exception:
-            amt = 0
-        prod_count.setdefault(pid, {'sold':0, 'revenue':0})
-        prod_count[pid]['revenue'] += amt
+    print(f"[DEBUG] Total revenue returned: {revenue}")
+    print(f"[DEBUG] Paymentorders included in revenue: {[x['_id'] for x in included_paymentorders]}")
 
     total_revenue = sum(v['revenue'] for v in prod_count.values()) if prod_count else 0
-    top_list = []
-    # resolve product names from products collection when available
+    # Resolve product names
     prod_names = {}
     try:
         prod_coll = db['products']
@@ -196,16 +214,34 @@ def agent_stats(agent_id: str, range: str = Query('1M')):
             else:
                 prod_names[pid] = 'Unknown'
     except Exception:
-        # fallback: use pid as name
         for pid in prod_count.keys():
             prod_names[pid] = pid
 
+    top_list = []
     for pid, v in prod_count.items():
-        top_list.append({'policyId': pid, 'policyName': prod_names.get(pid, pid), 'sold': v['sold'], 'revenue': v['revenue'], 'contribution': int((v['revenue']/total_revenue*100) if total_revenue else 0)})
+        top_list.append({
+            'policyId': pid,
+            'policyName': prod_names.get(pid, pid),
+            'sold': v['sold'],
+            'revenue': v['revenue'],
+            'contribution': int((v['revenue']/total_revenue*100) if total_revenue else 0)
+        })
     top_list = sorted(top_list, key=lambda x: x['sold'], reverse=True)
     best = top_list[0] if top_list else None
-    
-    return JSONResponse({'policiesIssued': policies_issued, 'revenue': revenue, 'bestSellingPolicy': best, 'topPolicies': top_list, 'period': {'from': start.isoformat(), 'to': end.isoformat()}})
+
+    # Multiply all revenue values by 100 for paise convention
+    revenue_paise = revenue * 100
+    for item in top_list:
+        item['revenue'] = item['revenue'] * 100
+    if best:
+        best['revenue'] = best['revenue'] * 100
+    return JSONResponse({
+        'policiesIssued': policies_issued,
+        'revenue': revenue_paise,
+        'bestSellingPolicy': best,
+        'topPolicies': top_list,
+        'period': {'from': start.isoformat(), 'to': end.isoformat()}
+    })
 
 
 @app.get('/api/agents/{agent_id}/dashboard/chart')
@@ -242,30 +278,69 @@ def agent_chart(agent_id: str, start: str = None, end: str = None, interval: str
 def agent_policies(agent_id: str, page: int = 1, limit: int = 10, sortBy: str = 'sold', order: str = 'desc', range: str = '1M'):
     db = get_mongo_client().get_database('test')
     start, end = _range_to_dates(range)
-    apps = list(db['policyapplications'].find({'agentId': agent_id}))
+    # Handle agentId as ObjectId or string
+    apps = list(db['policyapplications'].find({'$or': [{'agentId': agent_id}, {'agentId': try_objectid(agent_id)}]}))
+    print(f"[DEBUG] Found {len(apps)} policyapplications for agentId {agent_id}")
     app_ids = [a.get('_id') for a in apps]
     if not app_ids:
+        print("[DEBUG] No applications found for agent, returning empty data.")
         return JSONResponse({'data': [], 'pagination': {'page': page, 'limit': limit, 'total': 0}})
+    appid_to_product = {str(a.get('_id')): str(a.get('productId')) if a.get('productId') else None for a in apps}
     iss_q = {'applicationId': {'$in': app_ids}, 'createdAt': {'$gte': start, '$lte': end}}
+    print(f"[DEBUG] Issuance query: {iss_q}")
     issuances = list(db['policyissuances'].find(iss_q))
+    print(f"[DEBUG] Found {len(issuances)} policyissuances for agentId {agent_id}")
     perf = {}
     for ins in issuances:
-        pid = str(ins.get('productId') or '')
-        entry = perf.setdefault(pid, {'sold':0, 'revenue':0})
+        pid = ins.get('productId')
+        if not pid:
+            pid = appid_to_product.get(str(ins.get('applicationId')))
+        pid = str(pid) if pid else 'unknown'
+        entry = perf.setdefault(pid, {'sold': 0, 'revenue': 0})
         entry['sold'] += 1
     payments = list(db['paymentorders'].find({'applicationId': {'$in': app_ids}, 'createdAt': {'$gte': start, '$lte': end}}))
+    ok_status = set(['paid','success','captured','completed','PAID','SUCCESS','CAPTURED','COMPLETED'])
     for p in payments:
-        pid = str(p.get('productId') or '')
-        try:
-            amt = int(p.get('amount') or 0)
-        except Exception:
-            amt = 0
-        perf.setdefault(pid, {'sold':0, 'revenue':0})
-        perf[pid]['revenue'] += amt
-    total = sum(v['sold'] for v in perf.values()) if perf else 0
+        if str(p.get('status', '')).lower() in ok_status:
+            pid = appid_to_product.get(str(p.get('applicationId'))) or 'unknown'
+            pid = str(pid)
+            try:
+                amt = int(p.get('amount') or 0)
+            except Exception:
+                amt = 0
+            perf.setdefault(pid, {'sold': 0, 'revenue': 0})
+            perf[pid]['revenue'] += amt
+    # Resolve product names
+    prod_names = {}
+    try:
+        prod_coll = db['products']
+        for pid in list(perf.keys()):
+            if pid and pid != 'unknown':
+                try:
+                    lookup = try_objectid(pid)
+                    doc = prod_coll.find_one({'_id': lookup})
+                except Exception:
+                    doc = prod_coll.find_one({'_id': pid})
+                if doc and doc.get('name'):
+                    prod_names[pid] = doc.get('name')
+                else:
+                    prod_names[pid] = pid
+            else:
+                prod_names[pid] = 'Unknown'
+    except Exception:
+        for pid in perf.keys():
+            prod_names[pid] = pid
+    total_revenue = sum(x['revenue'] for x in perf.values()) if perf else 0
     rows = []
     for pid, v in perf.items():
-        rows.append({'policyId': pid, 'policyName': pid, 'icon': None, 'sold': v['sold'], 'revenue': v['revenue'], 'contribution': int((v['revenue']/sum(x['revenue'] for x in perf.values())*100) if perf and sum(x['revenue'] for x in perf.values()) else 0)})
+        rows.append({
+            'policyId': pid,
+            'policyName': prod_names.get(pid, pid),
+            'icon': None,
+            'sold': v['sold'],
+            'revenue': v['revenue'] * 100,
+            'contribution': int((v['revenue']/total_revenue*100) if total_revenue else 0)
+        })
     if sortBy in ('sold','revenue','contribution'):
         rows = sorted(rows, key=lambda x: x.get(sortBy,0), reverse=(order=='desc'))
     total_items = len(rows)
