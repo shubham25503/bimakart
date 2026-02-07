@@ -2,7 +2,6 @@ altair==6.0.0
 annotated-doc==0.0.4
 annotated-types==0.7.0
 anyio==4.12.1
-appscript==1.4.0
 attrs==25.4.0
 blinker==1.9.0
 cachetools==6.2.5
