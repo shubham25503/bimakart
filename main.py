@@ -1,4 +1,4 @@
-
+# --- Imports ---
 import os
 import io
 import re
@@ -10,11 +10,23 @@ from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from pymongo import MongoClient
+from starlette.background import BackgroundTask
 try:
     from bson.objectid import ObjectId
 except Exception:
     ObjectId = None
 from datetime import datetime
+# For docx and pdf generation
+from docx import Document
+import uuid
+import shutil
+import zipfile
+import tempfile
+try:
+    from docx2pdf import convert as docx2pdf_convert
+except ImportError:
+    docx2pdf_convert = None
+
 
 # --- Configuration ---
 load_dotenv()
@@ -48,6 +60,327 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- Routes ---
+
+# --- API: Get all applications for a product ---
+@app.get('/api/applications')
+def get_applications(productId: str = None):
+    db = get_mongo_client().get_database('test')
+    qry = {}
+    if productId:
+        qry['productId'] = try_objectid(productId)
+    apps = list(db['policyapplications'].find(qry))
+    data = [{
+        '_id': str(a.get('_id')),
+        'firstName': a.get('firstName', ''),
+        'lastName': a.get('lastName', ''),
+        'email': a.get('email', ''),
+        'mobile': a.get('mobile', ''),
+        'status': a.get('status', ''),
+    } for a in apps]
+    return JSONResponse({'data': data})
+
+# --- API: Get all insured people for an application ---
+@app.get('/api/insuredpeople')
+def get_insured_people(applicationId: str = None):
+    db = get_mongo_client().get_database('test')
+    qry = {}
+    if applicationId:
+        qry['applicationId'] = try_objectid(applicationId)
+    people = list(db['insuredpeople'].find(qry))
+    data = [{
+        '_id': str(p.get('_id')),
+        'personIndex': p.get('personIndex'),
+        'data': p.get('data', {}),
+    } for p in people]
+    return JSONResponse({'data': data})
+
+# --- Member Details PDF Generation ---
+@app.get("/api/member-details/{application_id}/pdf")
+def generate_member_details_pdf(application_id: str, insuredId: str = None, format: str = "docx"):
+    """
+    Fetches data from DB, fills Member Details.docx, converts to PDF, returns PDF.
+    """
+    db = get_mongo_client().get_database('test')
+    # Fetch application and insured people
+    application = db['policyapplications'].find_one({"_id": try_objectid(application_id)})
+    if not application:
+        return JSONResponse({"error": "Application not found"}, status_code=404)
+    insured_q = {"applicationId": try_objectid(application_id)}
+    if insuredId:
+        insured_q['_id'] = try_objectid(insuredId)
+    insured_people = list(db['insuredpeople'].find(insured_q))
+
+    # Fetch product and base products for policy details
+    product = None
+    policy_name = ""
+    terms_list = []
+    online_names = []
+    online_desc = []
+    offline_names = []
+    offline_desc = []
+    try:
+        if application.get('productId'):
+            product = db['products'].find_one({'_id': application.get('productId')})
+        if product:
+            policy_name = product.get('name', '') or ""
+            base_ids = product.get('baseProduct') or []
+            if base_ids:
+                base_coll = db['baseproducts']
+                for bid in base_ids:
+                    lookup_id = try_objectid(bid)
+                    bp = base_coll.find_one({'_id': lookup_id})
+                    if not bp:
+                        continue
+                    if bp.get('termsConditions'):
+                        terms_list.append(bp.get('termsConditions'))
+                    name_val = bp.get('name') or "-"
+                    desc_val = bp.get('detailDescription') or bp.get('termsConditions') or "-"
+                    if bp.get('online') is True:
+                        online_names.append(name_val)
+                        online_desc.append(desc_val)
+                    else:
+                        offline_names.append(name_val)
+                        offline_desc.append(desc_val)
+    except Exception:
+        policy_name = policy_name or ""
+        terms_list = terms_list or []
+
+    if not policy_name:
+        policy_name = "Platinum Membership"
+    # Single T&C (all base products share the same); take the first non-empty
+    t_and_c_text = "\n".join(terms_list[:1]) if terms_list else ""
+    t_and_c_value = t_and_c_text or "-"
+
+    # Online/offline base products, aligned line-wise (name line, description line)
+    online_policy_name = "\n".join([x for x in online_names if x]) or "-"
+    online_policy_desc = "\n".join([x for x in online_desc if x]) or "-"
+    offline_policy_name = "\n".join([x for x in offline_names if x]) or "-"
+    offline_policy_desc = "\n".join([x for x in offline_desc if x]) or "-"
+
+    # Member/order details
+    membership_num = str(application.get('_id', '')) or "-"
+    issue_date = application.get('createdAt')
+    issue_date_str = issue_date.isoformat()[:10] if isinstance(issue_date, datetime) else "-"
+    end_date_str = "-"
+    customer_name = " ".join(filter(None, [application.get('firstName'), application.get('lastName')])) or "-"
+    contact_number = application.get('mobile') or "-"
+    dob = "-"
+    gender = "-"
+    nominee_name = "-"
+    nominee_relation = "-"
+    if insured_people:
+        primary = insured_people[0]
+        pdata = primary.get('data') or {}
+        dob = pdata.get('dob') or "-"
+        gender = pdata.get('gender') or "-"
+        nominee_name = pdata.get('nomineeName') or "-"
+        nominee_relation = pdata.get('nomineeRelation') or "-"
+
+    # Payment/order amounts
+    order_id = "-"
+    net_price = "-"
+    gst_val = "-"
+    selling_price = "-"
+    try:
+        pay = db['paymentorders'].find_one({'applicationId': application.get('_id')}, sort=[('createdAt', -1)])
+        if pay:
+            order_id = str(pay.get('_id') or pay.get('razorpayPaymentId') or pay.get('razorpayPaymentLinkId') or '-')
+            amount = pay.get('amount')
+            if amount is not None:
+                try:
+                    selling_price_num = float(amount)
+                    gst_num = round(selling_price_num * 0.18 / 1.18)
+                    net_num = selling_price_num - gst_num
+                    selling_price = f"{selling_price_num:.2f}"
+                    gst_val = f"{gst_num:.2f}"
+                    net_price = f"{net_num:.2f}"
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    insurer = "-"
+    policy_number = "-"
+    # Prepare docx template
+    template_path = os.path.join(os.path.dirname(__file__), "Member Details.docx")
+    if not os.path.exists(template_path):
+        return JSONResponse({"error": "Template DOCX not found"}, status_code=500)
+    doc = Document(template_path)
+    # Replace placeholders in the docx
+    placeholders = {
+        "{{firstName}}": application.get("firstName") or "-",
+        "{{lastName}}": application.get("lastName") or "-",
+        "{{email}}": application.get("email") or "-",
+        "{{mobile}}": contact_number,
+        "{{#policy_name}}": policy_name,
+        "{{policy_name}}": policy_name,
+        "{{#t_and_c}}": t_and_c_value,
+        "{{t_and_c}}": t_and_c_value,
+        "{{policy_name}} (this is where t and c are going to be there)": t_and_c_value,
+        "{{customer_name}}": customer_name,
+        "{{full_name}}": customer_name,
+        "{{first_name}}": application.get("firstName") or "-",
+        "{{last_name}}": application.get("lastName") or "-",
+        "{{phone_number}}": contact_number,
+        "{{contact_number}}": contact_number,
+        "{{address}}": application.get("address") or "-",
+        "{{city}}": application.get("city") or "-",
+        "{{state}}": application.get("state") or "-",
+        "{{country}}": application.get("country") or "-",
+        "{{pincode}}": application.get("pincode") or "-",
+        "{{gender}}": gender,
+        "{{dob}}": dob,
+        "{{nominee_name}}": nominee_name,
+        "{{nominee_relation}}": nominee_relation,
+        "{{member_num}}": membership_num,
+        "{{issue_date}}": issue_date_str,
+        "{{end_date}}": end_date_str,
+        "{{order_id}}": order_id,
+        "{{net_price}}": net_price,
+        "{{gst}}": gst_val,
+        "{{selling_price}}": selling_price,
+        "{{insurer}}": insurer,
+        "{{policyNumber}}": policy_number,
+        "{{policy_number}}": policy_number,
+        "{{#online_policy_name}}": online_policy_name,
+        "{{online_policy_name}}": online_policy_name,
+        "{{#online_policy_description}}": online_policy_desc,
+        "{{online_policy_description}}": online_policy_desc,
+        "{{#offline_policy_name}}": offline_policy_name,
+        "{{offline_policy_name}}": offline_policy_name,
+        "{{#offline_policy_description}}": offline_policy_desc,
+        "{{offline_policy_description}}": offline_policy_desc,
+    }
+
+    def replace_in_paragraphs(paragraphs, mapping):
+        for para in paragraphs:
+            for ph, val in mapping.items():
+                if ph in para.text:
+                    for run in para.runs:
+                        if ph in run.text:
+                            run.text = run.text.replace(ph, str(val))
+                    para.text = para.text.replace(ph, str(val))
+
+    def replace_in_tables(tables, mapping):
+        for table in tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    replace_in_paragraphs(cell.paragraphs, mapping)
+
+    def replace_in_headers_footers(document, mapping):
+        for section in document.sections:
+            replace_in_paragraphs(section.header.paragraphs, mapping)
+            replace_in_tables(section.header.tables, mapping)
+            replace_in_paragraphs(section.footer.paragraphs, mapping)
+            replace_in_tables(section.footer.tables, mapping)
+
+    replace_in_paragraphs(doc.paragraphs, placeholders)
+    replace_in_tables(doc.tables, placeholders)
+    replace_in_headers_footers(doc, placeholders)
+
+    # Fallback: replace a literal title if present
+    if policy_name:
+        replace_in_paragraphs(doc.paragraphs, {"Platinum Membership": policy_name})
+        replace_in_tables(doc.tables, {"Platinum Membership": policy_name})
+
+    # If no explicit placeholder for T&C, append it at the end
+    if t_and_c_text:
+        found_tnc_placeholder = any("t_and_c" in p.text for p in doc.paragraphs)
+        if not found_tnc_placeholder:
+            doc.add_paragraph(t_and_c_text)
+
+    # TODO: If the template has a table for insured people, populate it here using insured_people.
+    # Save filled docx with applicant name in filename to aid debugging
+    base_name = "_".join([application.get("firstName", ""), application.get("lastName", "")]).strip("_")
+    safe_name = re.sub(r"[^A-Za-z0-9_-]+", "", base_name) or "member"
+    temp_docx = f"/tmp/member_details_{safe_name}_{uuid.uuid4().hex}.docx"
+    doc.save(temp_docx)
+
+    # Raw XML replace to catch placeholders inside shapes/textboxes
+    try:
+        def raw_replace(docx_path, mapping):
+            with tempfile.TemporaryDirectory() as td:
+                with zipfile.ZipFile(docx_path, 'r') as zin:
+                    zin.extractall(td)
+                # Replace in all XML parts
+                for root, _, files in os.walk(td):
+                    for fn in files:
+                        if fn.endswith('.xml'):
+                            p = os.path.join(root, fn)
+                            try:
+                                with open(p, 'r', encoding='utf-8') as f:
+                                    content = f.read()
+                                for ph, val in mapping.items():
+                                    content = content.replace(ph, str(val))
+                                with open(p, 'w', encoding='utf-8') as f:
+                                    f.write(content)
+                            except Exception:
+                                pass
+                # Repack
+                with zipfile.ZipFile(docx_path, 'w', zipfile.ZIP_DEFLATED) as zout:
+                    for root, _, files in os.walk(td):
+                        for fn in files:
+                            fp = os.path.join(root, fn)
+                            arcname = os.path.relpath(fp, td)
+                            zout.write(fp, arcname)
+        raw_mapping = dict(placeholders)
+        raw_mapping["Platinum Membership"] = policy_name or raw_mapping.get("Platinum Membership", "")
+        raw_replace(temp_docx, raw_mapping)
+    except Exception:
+        pass
+    # Decide output format
+    want_pdf = str(format).lower() == "pdf"
+    temp_pdf = temp_docx.replace(".docx", ".pdf")
+    pdf_ready = False
+
+    if want_pdf and docx2pdf_convert:
+        try:
+            docx2pdf_convert(temp_docx, temp_pdf)
+            pdf_ready = os.path.exists(temp_pdf) and os.path.getsize(temp_pdf) > 0
+        except Exception:
+            pdf_ready = False
+
+    if want_pdf and pdf_ready:
+        def cleanup_files():
+            for path in (temp_docx, temp_pdf):
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+        return FileResponse(
+            temp_pdf,
+            media_type="application/pdf",
+            filename="MemberDetails.pdf",
+            background=BackgroundTask(cleanup_files),
+            headers={"Content-Disposition": 'attachment; filename="MemberDetails.pdf"'}
+        )
+
+    # Fallback to DOCX (either requested explicitly or PDF unavailable)
+    def cleanup_docx():
+        try:
+            os.remove(temp_docx)
+        except Exception:
+            pass
+        try:
+            if os.path.exists(temp_pdf):
+                os.remove(temp_pdf)
+        except Exception:
+            pass
+    return FileResponse(
+        temp_docx,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        filename="MemberDetails.docx",
+        background=BackgroundTask(cleanup_docx),
+        headers={"Content-Disposition": 'attachment; filename="MemberDetails.docx"'}
+    )
+
+
+# --- Member Details DOCX direct endpoint ---
+@app.get("/api/member-details/{application_id}/docx")
+def generate_member_details_docx(application_id: str, insuredId: str = None):
+    return generate_member_details_pdf(application_id, insuredId=insuredId, format="docx")
 
 # --- Routes ---
 @app.get("/")
@@ -474,3 +807,5 @@ async def validate_excel(product_id: str, file: UploadFile = File(...)):
     if errors:
         return JSONResponse({"valid": False, "errors": errors})
     return JSONResponse({"valid": True, "message": "Excel is valid."})
+
+

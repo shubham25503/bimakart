@@ -79,6 +79,7 @@
 	</style>
 </head>
 <body>
+
 	<div class="container">
 		<h2>Download Product Fields as Excel</h2>
 		<label for="productSelect">Select Product:</label>
@@ -93,62 +94,92 @@
 			<button type="submit" style="margin-top:0.5rem;">Validate Excel</button>
 		</form>
 		<div id="validationResult" style="margin-top:1.2rem;"></div>
+
+		<hr style="margin:2rem 0;">
+		<h2>Download Member Details PDF</h2>
+		<label for="productSelectPDF">Select Product:</label>
+		<select id="productSelectPDF">
+			<option value="">-- Select --</option>
+		</select>
+		<label for="applicationSelect" style="margin-top:1rem;display:block;">Select Application:</label>
+		<select id="applicationSelect" style="margin-bottom:1rem;">
+			<option value="">-- Select --</option>
+		</select>
+		<label for="insuredSelect" style="margin-top:1rem;display:block;">Select Insured Person:</label>
+		<select id="insuredSelect" style="margin-bottom:1rem;">
+			<option value="">-- Select --</option>
+		</select>
+		<button id="downloadPDFBtn" style="display:none; margin-bottom: 1.2rem;">Download Member PDF</button>
+		<div id="pdfStatus" style="margin-top:1.2rem;"></div>
 	</div>
 
+
 	<script>
-		// const BACKEND_URL = 'http://localhost:8081'; 
-		const BACKEND_URL = 'https://bimakart.onrender.com'; 
+		const BACKEND_URL = 'http://localhost:8000'; 
+		// const BACKEND_URL = 'https://bimakart.onrender.com'; 
+		// Excel section
 		const select = document.getElementById('productSelect');
 		const btn = document.getElementById('downloadBtn');
 		let products = [];
 
-		// Fetch products from backend
+		// PDF section
+		const selectPDF = document.getElementById('productSelectPDF');
+		const applicationSelect = document.getElementById('applicationSelect');
+		const insuredSelect = document.getElementById('insuredSelect');
+		const downloadPDFBtn = document.getElementById('downloadPDFBtn');
+		const pdfStatus = document.getElementById('pdfStatus');
+
+		// Fetch products for both selects
 		fetch(BACKEND_URL + '/api/products/active')
 			.then(res => res.json())
 			.then(data => {
 				products = data.data || [];
 				products.forEach(p => {
-					const opt = document.createElement('option');
-					opt.value = p._id;
-					opt.textContent = p.name;
-					select.appendChild(opt);
+					const opt1 = document.createElement('option');
+					opt1.value = p._id;
+					opt1.textContent = p.name;
+					select.appendChild(opt1);
+					const opt2 = document.createElement('option');
+					opt2.value = p._id;
+					opt2.textContent = p.name;
+					selectPDF.appendChild(opt2);
 				});
 			});
 
+		// Excel download and validation logic (unchanged)
 		select.addEventListener('change', function() {
 			btn.style.display = select.value ? '' : 'none';
 			document.getElementById('uploadForm').style.display = select.value ? '' : 'none';
 			document.getElementById('validationResult').innerHTML = '';
-				// Excel upload and validation
-				const uploadForm = document.getElementById('uploadForm');
-				const excelFile = document.getElementById('excelFile');
-				const validationResult = document.getElementById('validationResult');
+		});
 
-				uploadForm.addEventListener('submit', function(e) {
-					e.preventDefault();
-					const productId = select.value;
-					if (!productId || !excelFile.files.length) return;
-					const formData = new FormData();
-					formData.append('file', excelFile.files[0]);
-					validationResult.innerHTML = 'Validating...';
-					fetch(BACKEND_URL + `/validate-excel/${productId}`, {
-						method: 'POST',
-						body: formData
-					})
-					.then(res => res.json())
-					.then(data => {
-						if (data.valid) {
-							validationResult.innerHTML = `<span style="color:green;font-weight:500;">&#10003; ${data.message}</span>`;
-						} else if (data.errors) {
-							validationResult.innerHTML = `<span style="color:#b91c1c;font-weight:500;">&#10007; Excel has errors:</span><ul style='color:#b91c1c;line-height:1.5;margin:0.5em 0 0 1.2em;'>` + data.errors.map(e => `<li>${e}</li>`).join('') + '</ul>';
-						} else {
-							validationResult.innerHTML = `<span style="color:#b91c1c;">&#10007; Validation failed.</span>`;
-						}
-					})
-					.catch(() => {
-						validationResult.innerHTML = `<span style="color:#b91c1c;">&#10007; Validation failed.</span>`;
-					});
-				});
+		// Single handler for Excel validation to avoid multiple bindings
+		document.getElementById('uploadForm').addEventListener('submit', function(e) {
+			e.preventDefault();
+			const productId = select.value;
+			const excelFile = document.getElementById('excelFile');
+			const validationResult = document.getElementById('validationResult');
+			if (!productId || !excelFile.files.length) return;
+			const formData = new FormData();
+			formData.append('file', excelFile.files[0]);
+			validationResult.innerHTML = 'Validating...';
+			fetch(BACKEND_URL + `/validate-excel/${productId}`, {
+				method: 'POST',
+				body: formData
+			})
+			.then(res => res.json())
+			.then(data => {
+				if (data.valid) {
+					validationResult.innerHTML = `<span style="color:green;font-weight:500;">&#10003; ${data.message}</span>`;
+				} else if (data.errors) {
+					validationResult.innerHTML = `<span style="color:#b91c1c;font-weight:500;">&#10007; Excel has errors:</span><ul style='color:#b91c1c;line-height:1.5;margin:0.5em 0 0 1.2em;'>` + data.errors.map(e => `<li>${e}</li>`).join('') + '</ul>';
+				} else {
+					validationResult.innerHTML = `<span style="color:#b91c1c;">&#10007; Validation failed.</span>`;
+				}
+			})
+			.catch(() => {
+				validationResult.innerHTML = `<span style="color:#b91c1c;">&#10007; Validation failed.</span>`;
+			});
 		});
 
 		btn.addEventListener('click', function() {
@@ -169,6 +200,87 @@
 					a.remove();
 				})
 				.catch(() => alert('Download failed.'));
+		});
+
+		// PDF section logic
+		selectPDF.addEventListener('change', function() {
+			applicationSelect.innerHTML = '<option value="">-- Select --</option>';
+			insuredSelect.innerHTML = '<option value="">-- Select --</option>';
+			downloadPDFBtn.style.display = 'none';
+			pdfStatus.innerHTML = '';
+			const productId = selectPDF.value;
+			if (!productId) return;
+			fetch(BACKEND_URL + `/api/applications?productId=${productId}`)
+				.then(res => res.json())
+				.then(data => {
+					const apps = data.data || [];
+					if (!apps.length) {
+						pdfStatus.innerHTML = '<span style="color:#b91c1c;">No applications found for this product.</span>';
+						return;
+					}
+					apps.forEach(a => {
+						const opt = document.createElement('option');
+						const label = [a.firstName, a.lastName].filter(Boolean).join(' ') || a.mobile || a.email || a._id;
+						opt.value = a._id;
+						opt.textContent = label;
+						applicationSelect.appendChild(opt);
+					});
+				})
+				.catch(() => {
+					pdfStatus.innerHTML = '<span style="color:#b91c1c;">Failed to load applications.</span>';
+				});
+		});
+
+		applicationSelect.addEventListener('change', function() {
+			insuredSelect.innerHTML = '<option value="">-- Select --</option>';
+			downloadPDFBtn.style.display = 'none';
+			pdfStatus.innerHTML = '';
+			const applicationId = applicationSelect.value;
+			if (!applicationId) return;
+			// Fetch insured people for this application
+			fetch(BACKEND_URL + `/api/insuredpeople?applicationId=${applicationId}`)
+				.then(res => res.json())
+				.then(data => {
+					if (data && data.data && data.data.length) {
+						data.data.forEach(person => {
+							const opt = document.createElement('option');
+							opt.value = person._id;
+							opt.textContent = person.data && person.data.name ? person.data.name : person._id;
+							insuredSelect.appendChild(opt);
+						});
+					} else {
+						pdfStatus.innerHTML = '<span style="color:#b91c1c;">No insured people found for this application.</span>';
+					}
+				});
+		});
+
+		insuredSelect.addEventListener('change', function() {
+			downloadPDFBtn.style.display = insuredSelect.value ? '' : 'none';
+			pdfStatus.innerHTML = '';
+		});
+
+		downloadPDFBtn.addEventListener('click', function() {
+			const applicationId = applicationSelect.value;
+			const insuredId = insuredSelect.value;
+			if (!applicationId || !insuredId) return;
+			pdfStatus.innerHTML = 'Preparing file...';
+			fetch(BACKEND_URL + `/api/member-details/${applicationId}/docx?insuredId=${insuredId}`)
+				.then(response => {
+					if (!response.ok) throw new Error('Failed to download');
+					return response.blob();
+				})
+				.then(blob => {
+					const a = document.createElement('a');
+					a.href = window.URL.createObjectURL(blob);
+					a.download = 'MemberDetails_' + insuredId + '.docx';
+					document.body.appendChild(a);
+					a.click();
+					a.remove();
+					pdfStatus.innerHTML = '<span style="color:green;">File downloaded.</span>';
+				})
+				.catch(() => {
+					pdfStatus.innerHTML = '<span style="color:#b91c1c;">Download failed.</span>';
+				});
 		});
 	</script>
 </body>
