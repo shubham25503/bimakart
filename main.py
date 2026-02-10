@@ -753,7 +753,7 @@ def download_product_excel(product_id: str):
     )
 
 @app.post("/validate-excel/{product_id}")
-async def validate_excel(product_id: str, file: UploadFile = File(...)):
+async def validate_excel(product_id: str, file: UploadFile = File(...), output: str = Query("json", enum=["json", "csv", "xlsx", "excel"])):
     url = f"{BACKEND_URL}/api/products/active"
     try:
         with httpx.Client(timeout=10) as client:
@@ -783,29 +783,48 @@ async def validate_excel(product_id: str, file: UploadFile = File(...)):
             val = str(value).strip() if pd.notnull(value) else ""
             if t == "number":
                 if val and not val.isdigit():
-                    errors.append(f"Row {idx+2}, Column {col_idx+1}: Not a valid number")
+                    errors.append({"row": idx + 2, "column": col_idx + 1, "message": "Not a valid number", "value": val})
             elif t == "email":
                 if val and not re.match(r"^[\w\.-]+@[\w\.-]+\.\w+$", val):
-                    errors.append(f"Row {idx+2}, Column {col_idx+1}: Not a valid email")
+                    errors.append({"row": idx + 2, "column": col_idx + 1, "message": "Not a valid email", "value": val})
             elif t == "adharCard":
                 val_no_space = val.replace(' ', '')
                 if val and not re.match(r"^\d{12}$", val_no_space):
-                    errors.append(f"Row {idx+2}, Column {col_idx+1}: Not a valid Aadhaar (12 digits, spaces ignored)")
+                    errors.append({"row": idx + 2, "column": col_idx + 1, "message": "Not a valid Aadhaar (12 digits, spaces ignored)", "value": val})
             elif t == "panCard":
                 if val and not re.match(r"^[A-Z]{5}\d{4}[A-Z]$", val, re.I):
-                    errors.append(f"Row {idx+2}, Column {col_idx+1}: Not a valid PAN (e.g. ABCDE1234F)")
+                    errors.append({"row": idx + 2, "column": col_idx + 1, "message": "Not a valid PAN (e.g. ABCDE1234F)", "value": val})
             elif t == "date":
                 if val:
                     try:
                         pd.to_datetime(val)
                     except Exception:
-                        errors.append(f"Row {idx+2}, Column {col_idx+1}: Not a valid date")
+                        errors.append({"row": idx + 2, "column": col_idx + 1, "message": "Not a valid date", "value": val})
             elif t in ["dropdown", "radio", "checkbox"]:
                 if val and val not in opts:
-                    errors.append(f"Row {idx+2}, Column {col_idx+1}: Value '{val}' not in allowed options")
+                    errors.append({"row": idx + 2, "column": col_idx + 1, "message": "Value not in allowed options", "value": val, "allowedOptions": opts})
             # text: always valid
     if errors:
-        return JSONResponse({"valid": False, "errors": errors})
+        if output in ("csv",):
+            buffer = io.StringIO()
+            pd.DataFrame(errors)[["row", "column", "message", "value"]].to_csv(buffer, index=False)
+            buffer.seek(0)
+            return StreamingResponse(
+                io.BytesIO(buffer.getvalue().encode("utf-8")),
+                media_type="text/csv",
+                headers={"Content-Disposition": "attachment; filename=validation_errors.csv"},
+            )
+        if output in ("xlsx", "excel"):
+            buffer = io.BytesIO()
+            pd.DataFrame(errors)[["row", "column", "message", "value"]].to_excel(buffer, index=False)
+            buffer.seek(0)
+            return StreamingResponse(
+                buffer,
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={"Content-Disposition": "attachment; filename=validation_errors.xlsx"},
+            )
+        messages = [f"Row {e['row']}, Column {e['column']}: {e['message']}" for e in errors]
+        return JSONResponse({"valid": False, "errors": messages})
     return JSONResponse({"valid": True, "message": "Excel is valid."})
 
 

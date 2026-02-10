@@ -94,6 +94,10 @@
 			<button type="submit" style="margin-top:0.5rem;">Validate Excel</button>
 		</form>
 		<div id="validationResult" style="margin-top:1.2rem;"></div>
+		<div id="downloadErrorActions" style="display:none; gap:0.5rem; margin-top:0.8rem;">
+			<button id="downloadErrorsCsv" type="button">Download errors (CSV)</button>
+			<button id="downloadErrorsXlsx" type="button">Download errors (Excel)</button>
+		</div>
 
 		<hr style="margin:2rem 0;">
 		<h2>Download Member Details PDF</h2>
@@ -115,7 +119,7 @@
 
 
 	<script>
-		//const BACKEND_URL = 'http://localhost:8000'; 
+		// const BACKEND_URL = 'http://localhost:8000'; 
 		const BACKEND_URL = 'https://bimakart.onrender.com'; 
 		// Excel section
 		const select = document.getElementById('productSelect');
@@ -154,32 +158,65 @@
 		});
 
 		// Single handler for Excel validation to avoid multiple bindings
-		document.getElementById('uploadForm').addEventListener('submit', function(e) {
-			e.preventDefault();
+		const validationResult = document.getElementById('validationResult');
+		const downloadErrorActions = document.getElementById('downloadErrorActions');
+		const downloadErrorsCsv = document.getElementById('downloadErrorsCsv');
+		const downloadErrorsXlsx = document.getElementById('downloadErrorsXlsx');
+
+		async function runValidation(outputFormat = 'json', download = false) {
 			const productId = select.value;
 			const excelFile = document.getElementById('excelFile');
-			const validationResult = document.getElementById('validationResult');
-			if (!productId || !excelFile.files.length) return;
+			if (!productId || !excelFile.files.length) return { ok: false };
 			const formData = new FormData();
 			formData.append('file', excelFile.files[0]);
+			const url = BACKEND_URL + `/validate-excel/${productId}?output=${outputFormat}`;
+			if (download) {
+				const res = await fetch(url, { method: 'POST', body: formData });
+				if (!res.ok) return { ok: false };
+				const blob = await res.blob();
+				const a = document.createElement('a');
+				a.href = window.URL.createObjectURL(blob);
+				a.download = outputFormat === 'csv' ? 'validation_errors.csv' : 'validation_errors.xlsx';
+				document.body.appendChild(a);
+				a.click();
+				a.remove();
+				return { ok: true };
+			}
+			const res = await fetch(url, { method: 'POST', body: formData });
+			if (!res.ok) return { ok: false };
+			return { ok: true, data: await res.json() };
+		}
+
+		document.getElementById('uploadForm').addEventListener('submit', function(e) {
+			e.preventDefault();
+			downloadErrorActions.style.display = 'none';
 			validationResult.innerHTML = 'Validating...';
-			fetch(BACKEND_URL + `/validate-excel/${productId}`, {
-				method: 'POST',
-				body: formData
-			})
-			.then(res => res.json())
-			.then(data => {
+			runValidation('json', false).then(result => {
+				if (!result.ok || !result.data) {
+					validationResult.innerHTML = `<span style="color:#b91c1c;">&#10007; Validation failed.</span>`;
+					return;
+				}
+				const data = result.data;
 				if (data.valid) {
 					validationResult.innerHTML = `<span style="color:green;font-weight:500;">&#10003; ${data.message}</span>`;
-				} else if (data.errors) {
-					validationResult.innerHTML = `<span style="color:#b91c1c;font-weight:500;">&#10007; Excel has errors:</span><ul style='color:#b91c1c;line-height:1.5;margin:0.5em 0 0 1.2em;'>` + data.errors.map(e => `<li>${e}</li>`).join('') + '</ul>';
-				} else {
-					validationResult.innerHTML = `<span style="color:#b91c1c;">&#10007; Validation failed.</span>`;
+					return;
 				}
-			})
-			.catch(() => {
+				if (data.errors) {
+					validationResult.innerHTML = `<span style="color:#b91c1c;font-weight:500;">&#10007; Excel has errors:</span><ul style='color:#b91c1c;line-height:1.5;margin:0.5em 0 0 1.2em;'>` + data.errors.map(e => `<li>${e}</li>`).join('') + '</ul>';
+					downloadErrorActions.style.display = 'flex';
+					return;
+				}
+				validationResult.innerHTML = `<span style="color:#b91c1c;">&#10007; Validation failed.</span>`;
+			}).catch(() => {
 				validationResult.innerHTML = `<span style="color:#b91c1c;">&#10007; Validation failed.</span>`;
 			});
+		});
+
+		downloadErrorsCsv.addEventListener('click', () => {
+			runValidation('csv', true);
+		});
+		downloadErrorsXlsx.addEventListener('click', () => {
+			runValidation('excel', true);
 		});
 
 		btn.addEventListener('click', function() {
