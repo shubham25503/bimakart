@@ -18,6 +18,7 @@ except Exception:
 from datetime import datetime
 # For docx and pdf generation
 from docx import Document
+from xml.sax.saxutils import escape
 import uuid
 import shutil
 import zipfile
@@ -313,7 +314,8 @@ def generate_member_details_pdf(application_id: str, insuredId: str = None, form
                                 with open(p, 'r', encoding='utf-8') as f:
                                     content = f.read()
                                 for ph, val in mapping.items():
-                                    content = content.replace(ph, str(val))
+                                    safe_val = escape(str(val))
+                                    content = content.replace(ph, safe_val)
                                 with open(p, 'w', encoding='utf-8') as f:
                                     f.write(content)
                             except Exception:
