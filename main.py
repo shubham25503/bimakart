@@ -15,7 +15,7 @@ try:
     from bson.objectid import ObjectId
 except Exception:
     ObjectId = None
-from datetime import datetime
+from datetime import datetime, timedelta
 # For docx and pdf generation
 from docx import Document
 from xml.sax.saxutils import escape
@@ -162,8 +162,8 @@ def generate_member_details_pdf(application_id: str, insuredId: str = None, form
 
     # Member/order details
     membership_num = str(application.get('_id', '')) or "-"
-    issue_date = application.get('createdAt')
-    issue_date_str = issue_date.isoformat()[:10] if isinstance(issue_date, datetime) else "-"
+    purchase_date = None
+    issue_date_str = "-"
     end_date_str = "-"
     customer_name = " ".join(filter(None, [application.get('firstName'), application.get('lastName')])) or "-"
     contact_number = application.get('mobile') or "-"
@@ -189,6 +189,7 @@ def generate_member_details_pdf(application_id: str, insuredId: str = None, form
         if pay:
             order_id = str(pay.get('_id') or pay.get('razorpayPaymentId') or pay.get('razorpayPaymentLinkId') or '-')
             amount = pay.get('amount')
+            purchase_date = pay.get('createdAt') or purchase_date
             if amount is not None:
                 try:
                     selling_price_num = float(amount)
@@ -201,6 +202,14 @@ def generate_member_details_pdf(application_id: str, insuredId: str = None, form
                     pass
     except Exception:
         pass
+
+    if purchase_date is None:
+        purchase_date = application.get('createdAt')
+    if isinstance(purchase_date, datetime):
+        issue_date_str = purchase_date.date().isoformat()
+        end_date_str = (purchase_date + timedelta(days=365)).date().isoformat()
+    elif purchase_date:
+        issue_date_str = str(purchase_date)
 
     insurer = "-"
     policy_number = "-"
