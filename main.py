@@ -152,7 +152,12 @@ def generate_member_details_pdf(application_id: str, insuredId: str = None, form
         policy_name = "Platinum Membership"
     # Single T&C (all base products share the same); take the first non-empty
     t_and_c_text = "\n".join(terms_list[:1]) if terms_list else ""
+    if t_and_c_text:
+        normalized = t_and_c_text.replace('\r\n', '\n').replace('\r', '\n')
+        normalized = re.sub(r'\n{2,}', '\n', normalized)
+        t_and_c_text = normalized.strip()
     t_and_c_value = t_and_c_text or "-"
+    print(f"[T&C] application_id={application_id} terms={t_and_c_value}")
 
     # Online/offline base products, aligned line-wise (name line, description line)
     online_policy_name = "\n".join([x for x in online_names if x]) or "-"
@@ -246,7 +251,9 @@ def generate_member_details_pdf(application_id: str, insuredId: str = None, form
         "{{nominee_relation}}": nominee_relation,
         "{{member_num}}": membership_num,
         "{{issue_date}}": issue_date_str,
+        "{{ issue_date }}": issue_date_str,
         "{{end_date}}": end_date_str,
+        "{{ end_date }}": end_date_str,
         "{{order_id}}": order_id,
         "{{net_price}}": net_price,
         "{{gst}}": gst_val,
@@ -254,6 +261,7 @@ def generate_member_details_pdf(application_id: str, insuredId: str = None, form
         "{{insurer}}": insurer,
         "{{policyNumber}}": policy_number,
         "{{policy_number}}": policy_number,
+        "{{/policy_name}}": "",
         "{{#online_policy_name}}": online_policy_name,
         "{{online_policy_name}}": online_policy_name,
         "{{#online_policy_description}}": online_policy_desc,
@@ -295,12 +303,6 @@ def generate_member_details_pdf(application_id: str, insuredId: str = None, form
         replace_in_paragraphs(doc.paragraphs, {"Platinum Membership": policy_name})
         replace_in_tables(doc.tables, {"Platinum Membership": policy_name})
 
-    # If no explicit placeholder for T&C, append it at the end
-    if t_and_c_text:
-        found_tnc_placeholder = any("t_and_c" in p.text for p in doc.paragraphs)
-        if not found_tnc_placeholder:
-            doc.add_paragraph(t_and_c_text)
-
     # TODO: If the template has a table for insured people, populate it here using insured_people.
     # Save filled docx with applicant name in filename to aid debugging
     base_name = "_".join([application.get("firstName", ""), application.get("lastName", "")]).strip("_")
@@ -325,6 +327,15 @@ def generate_member_details_pdf(application_id: str, insuredId: str = None, form
                                 for ph, val in mapping.items():
                                     safe_val = escape(str(val))
                                     content = content.replace(ph, safe_val)
+                                    if ph.startswith('{{') and ph.endswith('}}'):
+                                        core = ph[2:-2].strip()
+                                        if core:
+                                            pattern = (
+                                                r"\{\{(?:[\s\u2028\u2029\u00A0]|<[^>]+>|&[a-zA-Z]+;|&#\d+;)*"
+                                                + re.escape(core)
+                                                + r"(?:[\s\u2028\u2029\u00A0]|<[^>]+>|&[a-zA-Z]+;|&#\d+;)*\}\}"
+                                            )
+                                            content = re.sub(pattern, safe_val, content)
                                 with open(p, 'w', encoding='utf-8') as f:
                                     f.write(content)
                             except Exception:
