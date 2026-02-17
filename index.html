@@ -113,14 +113,18 @@
 		<select id="insuredSelect" style="margin-bottom:1rem;">
 			<option value="">-- Select --</option>
 		</select>
-		<button id="downloadPDFBtn" style="display:none; margin-bottom: 1.2rem;">Download Member PDF</button>
+		<div id="downloadButtons" style="display:none; gap:0.6rem; margin-bottom:1.2rem; flex-wrap:wrap;">
+			<button id="downloadPDFBtn">Download Member PDF</button>
+			<button id="downloadDOCXBtn" style="background:linear-gradient(90deg,#059669 60%,#065f46 100%);">Download Member DOCX</button>
+			<button id="downloadCloudPDFBtn" style="background:linear-gradient(90deg,#9333ea 60%,#6d28d9 100%);">Download Member PDF (Cloud)</button>
+		</div>
 		<div id="pdfStatus" style="margin-top:1.2rem;"></div>
 	</div>
 
 
 	<script>
-		// const BACKEND_URL = 'http://localhost:8000'; 
-		const BACKEND_URL = 'https://bimakart.onrender.com'; 
+		const BACKEND_URL = 'http://localhost:8081'; 
+		// const BACKEND_URL = 'https://bimakart.onrender.com'; 
 		// Excel section
 		const select = document.getElementById('productSelect');
 		const btn = document.getElementById('downloadBtn');
@@ -130,7 +134,10 @@
 		const selectPDF = document.getElementById('productSelectPDF');
 		const applicationSelect = document.getElementById('applicationSelect');
 		const insuredSelect = document.getElementById('insuredSelect');
+		const downloadButtons = document.getElementById('downloadButtons');
 		const downloadPDFBtn = document.getElementById('downloadPDFBtn');
+		const downloadDOCXBtn = document.getElementById('downloadDOCXBtn');
+		const downloadCloudPDFBtn = document.getElementById('downloadCloudPDFBtn');
 		const pdfStatus = document.getElementById('pdfStatus');
 
 		// Fetch products for both selects
@@ -243,7 +250,7 @@
 		selectPDF.addEventListener('change', function() {
 			applicationSelect.innerHTML = '<option value="">-- Select --</option>';
 			insuredSelect.innerHTML = '<option value="">-- Select --</option>';
-			downloadPDFBtn.style.display = 'none';
+			setDownloadButtonsVisible(false);
 			pdfStatus.innerHTML = '';
 			const productId = selectPDF.value;
 			if (!productId) return;
@@ -270,7 +277,7 @@
 
 		applicationSelect.addEventListener('change', function() {
 			insuredSelect.innerHTML = '<option value="">-- Select --</option>';
-			downloadPDFBtn.style.display = 'none';
+			setDownloadButtonsVisible(false);
 			pdfStatus.innerHTML = '';
 			const applicationId = applicationSelect.value;
 			if (!applicationId) return;
@@ -291,34 +298,77 @@
 				});
 		});
 
+		function setDownloadButtonsVisible(isVisible) {
+			if (isVisible) {
+				downloadButtons.style.display = 'flex';
+			} else {
+				downloadButtons.style.display = 'none';
+			}
+		}
+
 		insuredSelect.addEventListener('change', function() {
-			downloadPDFBtn.style.display = insuredSelect.value ? '' : 'none';
+			const ready = Boolean(insuredSelect.value);
+			setDownloadButtonsVisible(ready);
 			pdfStatus.innerHTML = '';
 		});
 
-		downloadPDFBtn.addEventListener('click', function() {
+		async function triggerMemberDownload(format, converter = 'local') {
 			const applicationId = applicationSelect.value;
 			const insuredId = insuredSelect.value;
-			if (!applicationId || !insuredId) return;
-			pdfStatus.innerHTML = 'Preparing file...';
-			fetch(BACKEND_URL + `/api/member-details/${applicationId}/docx?insuredId=${insuredId}`)
-				.then(response => {
-					if (!response.ok) throw new Error('Failed to download');
-					return response.blob();
-				})
-				.then(blob => {
-					const a = document.createElement('a');
-					a.href = window.URL.createObjectURL(blob);
-					a.download = 'MemberDetails_' + insuredId + '.docx';
-					document.body.appendChild(a);
-					a.click();
-					a.remove();
-					pdfStatus.innerHTML = '<span style="color:green;">File downloaded.</span>';
-				})
-				.catch(() => {
-					pdfStatus.innerHTML = '<span style="color:#b91c1c;">Download failed.</span>';
-				});
+			if (!applicationId || !insuredId) {
+				pdfStatus.innerHTML = '<span style="color:#b91c1c;">Select application and insured person first.</span>';
+				return;
+			}
+			const isPdf = format === 'pdf';
+			const isCloud = isPdf && converter === 'cloudconvert';
+			pdfStatus.innerHTML = isPdf
+				? (isCloud ? 'Preparing PDF via CloudConvert...' : 'Preparing PDF...')
+				: 'Preparing DOCX...';
+			const endpoint = isPdf
+				? `/api/member-details/${applicationId}/pdf?insuredId=${insuredId}&format=pdf${isCloud ? '&converter=cloudconvert' : ''}`
+				: `/api/member-details/${applicationId}/docx?insuredId=${insuredId}`;
+			try {
+				const response = await fetch(BACKEND_URL + endpoint);
+				if (!response.ok) {
+					let detail = 'Download failed.';
+					try {
+						const errData = await response.json();
+						detail = errData.details || errData.error || detail;
+					} catch (err) {
+						// ignore json parse issues
+					}
+					throw new Error(detail);
+				}
+				const blob = await response.blob();
+				const a = document.createElement('a');
+				a.href = window.URL.createObjectURL(blob);
+				const suffix = isCloud ? '_cloud' : '';
+				a.download = `MemberDetails_${insuredId}${suffix}.${isPdf ? 'pdf' : 'docx'}`;
+				document.body.appendChild(a);
+				a.click();
+				a.remove();
+				if (isPdf) {
+					pdfStatus.innerHTML = `<span style="color:green;">${isCloud ? 'CloudConvert PDF downloaded.' : 'PDF downloaded.'}</span>`;
+				} else {
+					pdfStatus.innerHTML = '<span style="color:green;">DOCX downloaded.</span>';
+				}
+			} catch (error) {
+				pdfStatus.innerHTML = `<span style="color:#b91c1c;">${error.message}</span>`;
+			}
+		}
+
+		downloadPDFBtn.addEventListener('click', function() {
+			triggerMemberDownload('pdf');
 		});
+
+		downloadDOCXBtn.addEventListener('click', function() {
+			triggerMemberDownload('docx');
+		});
+
+		downloadCloudPDFBtn.addEventListener('click', function() {
+			triggerMemberDownload('pdf', 'cloudconvert');
+		});
+
 	</script>
 </body>
 </html>

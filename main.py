@@ -2,11 +2,14 @@
 import os
 import io
 import re
+import time
 import httpx
 import math
 import pandas as pd
+import requests
 from fastapi import FastAPI, Response, UploadFile, File, Query
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from pymongo import MongoClient
@@ -19,10 +22,12 @@ from datetime import datetime, timedelta
 # For docx and pdf generation
 from docx import Document
 from xml.sax.saxutils import escape
+import html
 import uuid
 import shutil
 import zipfile
 import tempfile
+import subprocess
 try:
     from docx2pdf import convert as docx2pdf_convert
 except ImportError:
@@ -33,6 +38,7 @@ except ImportError:
 load_dotenv()
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8080")
 DATABASE_URL = os.environ.get("DATABASE_URL")
+CLOUDCONVERT_API_KEY = os.environ.get("CLOUDCONVERT_API_KEY")
 
 # Mongo client
 _mongo_client = None
@@ -52,6 +58,159 @@ def try_objectid(s):
     except Exception:
         return s
 
+
+def convert_docx_to_pdf(docx_path: str, pdf_path: str) -> bool:
+    """Try multiple strategies to convert DOCX to PDF and return success."""
+    if docx2pdf_convert:
+        try:
+            docx2pdf_convert(docx_path, pdf_path)
+            if os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 0:
+                return True
+        except Exception as exc:
+            print(f"[WARN] docx2pdf conversion failed: {exc}")
+
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if soffice:
+        out_dir = os.path.dirname(pdf_path) or "/tmp"
+        tmp_pdf_name = os.path.splitext(os.path.basename(docx_path))[0] + ".pdf"
+        tmp_pdf_path = os.path.join(out_dir, tmp_pdf_name)
+        try:
+            cmd = [
+                soffice,
+                "--headless",
+                "--convert-to",
+                "pdf",
+                "--outdir",
+                out_dir,
+                docx_path,
+            ]
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if os.path.exists(tmp_pdf_path):
+                shutil.move(tmp_pdf_path, pdf_path)
+                return True
+        except Exception as exc:
+            print(f"[WARN] LibreOffice conversion failed: {exc}")
+
+    unoconv = shutil.which("unoconv")
+    if unoconv:
+        try:
+            cmd = [
+                unoconv,
+                "--format",
+                "pdf",
+                "--output",
+                pdf_path,
+                docx_path,
+            ]
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 0:
+                return True
+        except Exception as exc:
+            print(f"[WARN] unoconv conversion failed: {exc}")
+
+    return False
+
+
+def convert_docx_to_pdf_cloudconvert(docx_path: str, pdf_path: str) -> bool:
+    """Convert DOCX to PDF using CloudConvert's API."""
+    if not CLOUDCONVERT_API_KEY:
+        print("[WARN] CLOUDCONVERT_API_KEY not configured.")
+        return False
+    try:
+        payload = {
+            "tasks": {
+                "upload-file": {"operation": "import/upload"},
+                "convert-file": {
+                    "operation": "convert",
+                    "input": "upload-file",
+                    "output_format": "pdf",
+                },
+                "export-file": {
+                    "operation": "export/url",
+                    "input": "convert-file",
+                },
+            }
+        }
+        headers = {
+            "Authorization": f"Bearer {CLOUDCONVERT_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        job_resp = requests.post(
+            "https://api.cloudconvert.com/v2/jobs",
+            headers=headers,
+            json=payload,
+            timeout=30,
+        )
+        job_resp.raise_for_status()
+        job_data = job_resp.json().get("data") or {}
+        tasks = job_data.get("tasks") or []
+        upload_task = next((task for task in tasks if task.get("name") == "upload-file"), None)
+        if not upload_task:
+            print("[WARN] CloudConvert upload task missing.")
+            return False
+        upload_result = upload_task.get("result") or {}
+        form_info = upload_result.get("form") or {}
+        upload_url = form_info.get("url")
+        upload_params = form_info.get("parameters") or {}
+        if not upload_url:
+            print("[WARN] CloudConvert upload URL missing.")
+            return False
+        with open(docx_path, "rb") as docx_file:
+            upload_resp = requests.post(
+                upload_url,
+                data=upload_params,
+                files={"file": docx_file},
+                timeout=60,
+            )
+            upload_resp.raise_for_status()
+        job_id = job_data.get("id")
+        if not job_id:
+            print("[WARN] CloudConvert job id missing.")
+            return False
+        deadline = time.time() + 180
+        while time.time() < deadline:
+            poll_resp = requests.get(
+                f"https://api.cloudconvert.com/v2/jobs/{job_id}",
+                headers={"Authorization": f"Bearer {CLOUDCONVERT_API_KEY}"},
+                timeout=30,
+            )
+            poll_resp.raise_for_status()
+            poll_data = poll_resp.json().get("data") or {}
+            status = poll_data.get("status")
+            if status == "finished":
+                export_task = next(
+                    (task for task in (poll_data.get("tasks") or []) if task.get("name") == "export-file"),
+                    None,
+                )
+                if not export_task:
+                    print("[WARN] CloudConvert export task missing.")
+                    return False
+                files_info = export_task.get("result", {}).get("files") or []
+                if not files_info:
+                    print("[WARN] CloudConvert export files missing.")
+                    return False
+                file_url = files_info[0].get("url")
+                if not file_url:
+                    print("[WARN] CloudConvert file url missing.")
+                    return False
+                download_resp = requests.get(file_url, timeout=60)
+                download_resp.raise_for_status()
+                with open(pdf_path, "wb") as pdf_file:
+                    pdf_file.write(download_resp.content)
+                return True
+            if status in {"error", "failed"}:
+                print(f"[WARN] CloudConvert job {job_id} failed: {status}")
+                return False
+            time.sleep(2)
+        print(f"[WARN] CloudConvert job {job_id} timed out.")
+        return False
+    except requests.RequestException as exc:
+        print(f"[WARN] CloudConvert API request failed: {exc}")
+        return False
+    except Exception as exc:
+        print(f"[WARN] CloudConvert conversion failed: {exc}")
+        return False
+
 # --- App Initialization ---
 app = FastAPI()
 app.add_middleware(
@@ -61,6 +220,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+if os.path.isdir(STATIC_DIR):
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 # --- Routes ---
 
@@ -99,7 +262,7 @@ def get_insured_people(applicationId: str = None):
 
 # --- Member Details PDF Generation ---
 @app.get("/api/member-details/{application_id}/pdf")
-def generate_member_details_pdf(application_id: str, insuredId: str = None, format: str = "docx"):
+def generate_member_details_pdf(application_id: str, insuredId: str = None, format: str = "pdf", converter: str = "local"):
     """
     Fetches data from DB, fills Member Details.docx, converts to PDF, returns PDF.
     """
@@ -313,10 +476,28 @@ def generate_member_details_pdf(application_id: str, insuredId: str = None, form
     # Raw XML replace to catch placeholders inside shapes/textboxes
     try:
         def raw_replace(docx_path, mapping):
+            def norm_key(ph_key):
+                inner = ph_key.strip('{} ')
+                inner = re.sub(r'\s+', '', inner)
+                return inner
+
+            norm_mapping = {norm_key(k): escape(str(v)) for k, v in mapping.items()}
+            placeholder_re = re.compile(r'\{\{.*?\}\}', re.DOTALL)
+
+            def replace_match(match):
+                raw = match.group(0)
+                inner = re.sub(r'<[^>]+>', '', raw)
+                inner = html.unescape(inner)
+                inner = inner.strip()
+                if inner.startswith('{{') and inner.endswith('}}'):
+                    inner = inner[2:-2]
+                normalized = re.sub(r'\s+', '', inner)
+                value = norm_mapping.get(normalized)
+                return value if value is not None else raw
+
             with tempfile.TemporaryDirectory() as td:
                 with zipfile.ZipFile(docx_path, 'r') as zin:
                     zin.extractall(td)
-                # Replace in all XML parts
                 for root, _, files in os.walk(td):
                     for fn in files:
                         if fn.endswith('.xml'):
@@ -324,23 +505,11 @@ def generate_member_details_pdf(application_id: str, insuredId: str = None, form
                             try:
                                 with open(p, 'r', encoding='utf-8') as f:
                                     content = f.read()
-                                for ph, val in mapping.items():
-                                    safe_val = escape(str(val))
-                                    content = content.replace(ph, safe_val)
-                                    if ph.startswith('{{') and ph.endswith('}}'):
-                                        core = ph[2:-2].strip()
-                                        if core:
-                                            pattern = (
-                                                r"\{\{(?:[\s\u2028\u2029\u00A0]|<[^>]+>|&[a-zA-Z]+;|&#\d+;)*"
-                                                + re.escape(core)
-                                                + r"(?:[\s\u2028\u2029\u00A0]|<[^>]+>|&[a-zA-Z]+;|&#\d+;)*\}\}"
-                                            )
-                                            content = re.sub(pattern, safe_val, content)
+                                content = placeholder_re.sub(replace_match, content)
                                 with open(p, 'w', encoding='utf-8') as f:
                                     f.write(content)
                             except Exception:
                                 pass
-                # Repack
                 with zipfile.ZipFile(docx_path, 'w', zipfile.ZIP_DEFLATED) as zout:
                     for root, _, files in os.walk(td):
                         for fn in files:
@@ -354,47 +523,44 @@ def generate_member_details_pdf(application_id: str, insuredId: str = None, form
         pass
     # Decide output format
     want_pdf = str(format).lower() == "pdf"
+    converter = (converter or "local").lower()
     temp_pdf = temp_docx.replace(".docx", ".pdf")
     pdf_ready = False
 
-    if want_pdf and docx2pdf_convert:
-        try:
-            docx2pdf_convert(temp_docx, temp_pdf)
-            pdf_ready = os.path.exists(temp_pdf) and os.path.getsize(temp_pdf) > 0
-        except Exception:
-            pdf_ready = False
-
-    if want_pdf and pdf_ready:
-        def cleanup_files():
-            for path in (temp_docx, temp_pdf):
-                try:
+    def cleanup_temp_files():
+        for path in (temp_docx, temp_pdf):
+            try:
+                if path and os.path.exists(path):
                     os.remove(path)
-                except Exception:
-                    pass
-        return FileResponse(
-            temp_pdf,
-            media_type="application/pdf",
-            filename="MemberDetails.pdf",
-            background=BackgroundTask(cleanup_files),
-            headers={"Content-Disposition": 'attachment; filename="MemberDetails.pdf"'}
-        )
+            except Exception:
+                pass
 
-    # Fallback to DOCX (either requested explicitly or PDF unavailable)
-    def cleanup_docx():
-        try:
-            os.remove(temp_docx)
-        except Exception:
-            pass
-        try:
-            if os.path.exists(temp_pdf):
-                os.remove(temp_pdf)
-        except Exception:
-            pass
+    if want_pdf:
+        if converter == "cloudconvert":
+            pdf_ready = convert_docx_to_pdf_cloudconvert(temp_docx, temp_pdf)
+        else:
+            pdf_ready = convert_docx_to_pdf(temp_docx, temp_pdf)
+        if pdf_ready:
+            return FileResponse(
+                temp_pdf,
+                media_type="application/pdf",
+                filename="MemberDetails.pdf",
+                background=BackgroundTask(cleanup_temp_files),
+                headers={"Content-Disposition": 'attachment; filename="MemberDetails.pdf"'}
+            )
+        cleanup_temp_files()
+        if converter == "cloudconvert":
+            detail = "Failed to convert DOCX to PDF via CloudConvert. Check API key, credits, or job logs."
+        else:
+            detail = "Failed to convert DOCX to PDF. Install Microsoft Word (for docx2pdf) or LibreOffice/unoconv on the server."
+        return JSONResponse({"error": detail}, status_code=500)
+
+    # Fallback to DOCX when explicitly requested
     return FileResponse(
         temp_docx,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         filename="MemberDetails.docx",
-        background=BackgroundTask(cleanup_docx),
+        background=BackgroundTask(cleanup_temp_files),
         headers={"Content-Disposition": 'attachment; filename="MemberDetails.docx"'}
     )
 
