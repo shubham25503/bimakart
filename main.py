@@ -157,7 +157,7 @@ def generate_member_details_pdf(application_id: str, insuredId: str = None, form
         normalized = re.sub(r'\n{2,}', '\n', normalized)
         t_and_c_text = normalized.strip()
     t_and_c_value = t_and_c_text or "-"
-    print(f"[T&C] application_id={application_id} terms={t_and_c_value}")
+
 
     # Online/offline base products, aligned line-wise (name line, description line)
     online_policy_name = "\n".join([x for x in online_names if x]) or "-"
